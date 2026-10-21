@@ -18,9 +18,9 @@ pip3 install requests
 
 Download this file into any location. 
 
-git clone https://github.com/DuckDoolittle/Bose.git
+git clone https://github.com/DuckDoolittle/BST10HLPR.git
 
-cd Bose
+cd BST10HLPR
 
 python3 BST10HLPR.py
 
