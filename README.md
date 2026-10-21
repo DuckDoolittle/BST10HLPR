@@ -7,10 +7,12 @@ Linux install:
 You may need to instal python 3:
 
 Ubuntu & Debian:
+
 sudo apt update && sudo apt install -y python3-tk python3-pip
 pip3 install requests
 
 Fedora:
+
 sudo dnf install -y python3-tkinter python3-pip
 pip3 install requests
 
