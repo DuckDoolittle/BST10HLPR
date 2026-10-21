@@ -2,17 +2,19 @@ This is a working for me python vibe-coded application that solves a real world 
 
 I have four Bose SoundTouch 10 speakers and since the app was dropped from support I have been unable to use them. 
 
-Linux install
-You may need to instal python 3
-Ubuntu & Debian
+Linux install:
+
+You may need to instal python 3:
+
+Ubuntu & Debian:
 sudo apt update && sudo apt install -y python3-tk python3-pip
 pip3 install requests
 
-Fedora
+Fedora:
 sudo dnf install -y python3-tkinter python3-pip
 pip3 install requests
 
-Download this file into any location. Here is a sample.
+Download this file into any location. Here is a sample:
 git clone https://github.com/DuckDoolittle/Bose.git
 cd Bose
 python3 BoseController.py
