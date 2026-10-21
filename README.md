@@ -29,10 +29,11 @@ Working
 I have tested this with a four SoundTouch 10 speakers setup. 
 Properly configured sets one of the speakers as a primary and the other three as slaves. 
 Connecting bluetooth to that primary device will replicate the sound to the other three devices.
+Suppots 20 speakers 5 Zones 
+Master IP is not selectible in Slave panel once selected as the master
 
 Next steps
-
-Planning to enable multiple zones. starting with three.
+Make it look cool!!!!
 
 Feel free to talk crap but if you do make it better, this is all I ask.
 
