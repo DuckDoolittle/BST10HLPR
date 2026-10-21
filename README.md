@@ -17,8 +17,10 @@ pip3 install requests
 Download this file into any location. 
 
 git clone https://github.com/DuckDoolittle/Bose.git
+
 cd Bose
-python3 BoseController.py
+
+python3 BST10HLPR.py
 
 Working
 
