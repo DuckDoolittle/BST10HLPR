@@ -4,7 +4,7 @@ I have four Bose SoundTouch 10 speakers and since the app was dropped from suppo
 
 Linux install:
 
-You may need to instal python 3:
+You may need to install python 3:
 
 Ubuntu & Debian:
 
@@ -36,7 +36,10 @@ Recent
 
 Removed Zones - no need for them just select the priamary speaker IP and a slave and sync then select a new master and slaves and sunc those. Connect bluetooth device to primary speaker you will need to match the blutooth network and to the IP. 
 
-Added Dark Mode by default 
+Added dark mode by default
+Added removal of IP
+Added Forgotten IP tab and added features
+
 
 Next steps
 
