@@ -9,6 +9,18 @@ Theme notes for KDE / Kubuntu:
   * ttk.Notebook has NO '-background' option (that is a plain-Tk option only).
     Notebook colours are set through the style, never via .configure().
   * Combobox drop-down lists are plain Tk Listboxes, styled via option_add().
+
+Session persistence:
+  Everything is written to ~/.bose_manager_config.json:
+    speakers          -> every IP ever seen, with its label
+    forgotten         -> IPs you explicitly removed (hidden from all lists)
+    zone_slaves       -> contents of the Zone Management listbox
+    zone_selection    -> which rows were highlighted
+    last_selected_ip  -> active speaker in the Control Center
+    master_ip         -> master speaker in Zone Management
+    dark_mode         -> theme
+    window_geometry   -> size and position
+  Saved on every change, and again on window close (WM_DELETE_WINDOW).
 """
 
 import tkinter as tk
@@ -18,10 +30,14 @@ import socket
 import threading
 import json
 import os
+import re
 from datetime import datetime
 import xml.etree.ElementTree as ET
 import webbrowser
 import time
+
+
+GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
 
 
 class BoseQuadManager:
@@ -30,7 +46,15 @@ class BoseQuadManager:
         self.root.title("Bose SoundTouch Quad-Manager")
         self.root.geometry("800x900")
         self.config_path = os.path.expanduser("~/.bose_manager_config.json")
-        self.discovered_speakers = {}
+
+        # ---------------------------------------------------------- state
+        self.discovered_speakers = {}   # ip -> label
+        self.forgotten_ips = set()      # hidden from every list until restored
+        self.zone_slaves = []           # contents of the Zone Management listbox
+        self.zone_selection = []        # highlighted rows in that listbox
+        self.master_ip = ""             # master speaker in Zone Management
+        self._saved_geometry = None
+
         self.selected_speaker_ip = tk.StringVar()
         self.is_open_network = tk.BooleanVar(value=False)
         self.dark_mode = tk.BooleanVar(value=True)
@@ -41,29 +65,94 @@ class BoseQuadManager:
 
         self.load_settings()
         self.setup_ui()
-        # Apply default theme on startup
+        self.restore_window_state()
+        # Apply theme last so it wins over widget construction defaults
         self.toggle_theme()
+
+        # Make sure a normal window close writes the session out
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # ------------------------------------------------------------------ config
     def load_settings(self):
-        if os.path.exists(self.config_path):
-            try:
-                with open(self.config_path, 'r') as f:
-                    data = json.load(f)
-                    self.discovered_speakers = data.get("speakers", {})
-                    last_ip = data.get("last_selected_ip", "")
-                    self.selected_speaker_ip.set(last_ip)
-            except Exception as e:
-                print(f"Error loading config: {e}")
+        """Read the previous session. Tolerates older/minimal config files."""
+        if not os.path.exists(self.config_path):
+            return
+        try:
+            with open(self.config_path, 'r') as f:
+                data = json.load(f)
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            return
+
+        self.discovered_speakers = data.get("speakers", {}) or {}
+        self.forgotten_ips = set(data.get("forgotten", []) or [])
+        self.zone_slaves = list(data.get("zone_slaves", []) or [])
+        self.zone_selection = [int(i) for i in (data.get("zone_selection", []) or [])
+                               if str(i).isdigit()]
+        self.selected_speaker_ip.set(data.get("last_selected_ip", "") or "")
+        self.master_ip = data.get("master_ip", "") or ""
+
+        if "dark_mode" in data:
+            self.dark_mode.set(bool(data["dark_mode"]))
+
+        geo = data.get("window_geometry")
+        if isinstance(geo, str) and GEOMETRY_RE.match(geo):
+            self._saved_geometry = geo
 
     def save_settings(self):
-        data = {"speakers": self.discovered_speakers,
-                "last_selected_ip": self.selected_speaker_ip.get()}
+        """Write the whole session out. Called on every change and on exit."""
+        geometry = None
+        try:
+            candidate = self.root.winfo_geometry()
+            # Ignore the bogus 1x1+0+0 reported before the window is mapped
+            if GEOMETRY_RE.match(candidate) and not candidate.startswith("1x1"):
+                geometry = candidate
+        except tk.TclError:
+            pass
+
+        data = {
+            "speakers": self.discovered_speakers,
+            "forgotten": sorted(self.forgotten_ips),
+            "zone_slaves": list(self.zone_slaves),
+            "zone_selection": list(self.zone_selection),
+            "last_selected_ip": self.selected_speaker_ip.get(),
+            "master_ip": self.master_combo.get() if hasattr(self, 'master_combo')
+                         else self.master_ip,
+            "dark_mode": bool(self.dark_mode.get()),
+            "window_geometry": geometry or self._saved_geometry,
+        }
         try:
             with open(self.config_path, 'w') as f:
-                json.dump(data, f)
+                json.dump(data, f, indent=2)
         except Exception as e:
             print(f"Error saving config: {e}")
+
+    def on_close(self):
+        """Persist the session, then quit."""
+        try:
+            self.save_settings()
+        finally:
+            self.root.destroy()
+
+    def restore_window_state(self):
+        """Reapply geometry, highlighted rows and report what was restored."""
+        if self._saved_geometry:
+            try:
+                self.root.geometry(self._saved_geometry)
+            except tk.TclError:
+                pass
+
+        if hasattr(self, 'slave_listbox') and self.zone_selection:
+            self.slave_listbox.selection_clear(0, tk.END)
+            size = self.slave_listbox.size()
+            for idx in self.zone_selection:
+                if 0 <= idx < size:
+                    self.slave_listbox.selection_set(idx)
+
+        if self.discovered_speakers:
+            self.log(f"Restored session: {len(self.discovered_speakers)} known speaker(s), "
+                     f"{len(self.zone_slaves)} in zone list, "
+                     f"{len(self.forgotten_ips)} forgotten.", "INFO")
 
     # --------------------------------------------------------------------- log
     def log(self, message, level="INFO"):
@@ -190,7 +279,7 @@ class BoseQuadManager:
               background=[("readonly", accent)],
               arrowcolor=[("disabled", "#808080")])
 
-        # --- labelled frames (the boxes that stayed light grey) -------------------
+        # --- labelled frames (the boxes that stayed light grey) ---------------
         s.configure("TLabelframe", background=bg, bordercolor=border,
                     lightcolor=border, darkcolor=border,
                     relief="solid", borderwidth=1)
@@ -246,6 +335,9 @@ class BoseQuadManager:
             self.danger_label.configure(foreground=danger)
         except (AttributeError, tk.TclError):
             pass
+
+        # Remember the choice straight away, not just on exit
+        self.save_settings()
 
     # ------------------------------------------------------------------- tabs
     def add_reset_links(self, parent_frame, target_tab=None):
@@ -345,7 +437,8 @@ class BoseQuadManager:
         self.speaker_combo = ttk.Combobox(top_row, textvariable=self.selected_speaker_ip,
                                           state="readonly")
         self.speaker_combo.pack(side=tk.LEFT, padx=10, expand=True, fill=tk.X)
-        
+        self.speaker_combo.bind("<<ComboboxSelected>>", lambda e: self.save_settings())
+
         # Group Scan and Forget buttons together
         btn_row = ttk.Frame(top_row)
         btn_row.pack(side=tk.LEFT)
@@ -360,12 +453,20 @@ class BoseQuadManager:
         ttk.Button(bottom_row, text="Add", command=self.add_manual_ip).pack(side=tk.LEFT)
 
     def add_manual_ip(self):
+        """Add an IP by hand. Also un-forgets it, so it is a way back in."""
         ip = self.manual_ip.get().strip()
-        if ip:
-            self.discovered_speakers[ip] = "Manually Added"
-            self.update_speaker_lists()
-            self.save_settings()
-            self.log(f"Manually added speaker {ip}", "SUCCESS")
+        if not ip:
+            return
+        self.discovered_speakers[ip] = "Manually Added"
+        if ip in self.forgotten_ips:
+            self.forgotten_ips.discard(ip)
+            self.log(f"{ip} was previously forgotten - restored to all lists.", "INFO")
+        if ip not in self.zone_slaves:
+            self.zone_slaves.append(ip)
+        self.manual_ip.delete(0, tk.END)
+        self.update_speaker_lists()
+        self.save_settings()
+        self.log(f"Manually added speaker {ip}", "SUCCESS")
 
     # --------------------------------------------------------------- playback
     def on_volume_slide(self, value):
@@ -400,24 +501,68 @@ class BoseQuadManager:
         except Exception:
             pass
 
+    # ---------------------------------------------------------------- forgetting
     def forget_ip(self):
-        # Identify the currently selected speaker in the Control Center
+        """Forget the active speaker everywhere. Persisted across restarts."""
         ip = self.selected_speaker_ip.get()
         if not ip:
             messagebox.showwarning("Error", "Please select a speaker from the list first.")
             return
-        
-        if messagebox.askyesno("Confirm", f"Forget speaker at {ip}?\nIt will remain unavailable until the next scan."):
-            if ip in self.discovered_speakers:
-                del self.discovered_speakers[ip]
-                self.update_speaker_lists()
-                self.save_settings()
-                self.log(f"Forgotten speaker at {ip}", "SUCCESS")
-                # Clear the selection if the active speaker was forgotten
-                self.selected_speaker_ip.set("")
-                self.speaker_combo.set("")
-            else:
-                self.log("Selected IP not found in discovered list.", "ERROR")
+
+        if messagebox.askyesno("Confirm",
+                               f"Forget speaker at {ip}?\n\n"
+                               "It stays hidden after restarting. Re-add it with "
+                               "'Add Manual IP' to bring it back."):
+            self.forgotten_ips.add(ip)
+            if ip in self.zone_slaves:
+                self.zone_slaves.remove(ip)
+            self.selected_speaker_ip.set("")
+            self.speaker_combo.set("")
+            self.update_speaker_lists()
+            self.save_settings()
+            self.log(f"Forgotten speaker at {ip} (saved)", "SUCCESS")
+
+    def forget_slave(self):
+        """Remove highlighted rows from the zone list, permanently."""
+        if not hasattr(self, 'slave_listbox'):
+            self.log("Slave listbox not initialized.", "ERROR")
+            return
+
+        selected_indices = self.slave_listbox.curselection()
+        if not selected_indices:
+            messagebox.showwarning("Error", "Please select one or more slave speakers to forget.")
+            return
+
+        ips_to_remove = [self.slave_listbox.get(i) for i in selected_indices]
+        listing = "\n".join(f"  • {ip}" for ip in ips_to_remove)
+
+        if messagebox.askyesno("Confirm",
+                               f"Forget {len(ips_to_remove)} speaker(s) from the zone?\n\n"
+                               f"{listing}\n\nThey stay hidden after restarting. "
+                               "Re-add with 'Add Manual IP' to bring them back."):
+            for ip in ips_to_remove:
+                self.forgotten_ips.add(ip)
+                if ip in self.zone_slaves:
+                    self.zone_slaves.remove(ip)
+
+            self.zone_selection = []
+            self.update_speaker_lists()
+            self.save_settings()
+            self.log(f"Forgot {len(ips_to_remove)} speaker(s) from zone (saved)", "SUCCESS")
+
+    def on_slave_select(self, event=None):
+        """Remember which rows are highlighted."""
+        try:
+            self.zone_selection = list(self.slave_listbox.curselection())
+            self.save_settings()
+        except tk.TclError:
+            pass
+
+    def on_master_select(self, event=None):
+        self.master_ip = self.master_combo.get()
+        self.save_settings()
+
+    # -------------------------------------------------------------- discovery
     def start_discovery(self):
         self.log("Starting SSDP scan...")
         threading.Thread(target=self.discover_speakers, daemon=True).start()
@@ -432,27 +577,68 @@ class BoseQuadManager:
             sock.sendto(msg.encode(), ('239.255.255.250', 1900))
             while True:
                 data, addr = sock.recvfrom(1024)
-                if addr[0] not in self.discovered_speakers:
-                    self.log(f"Found speaker at {addr[0]}", "SUCCESS")
-                self.discovered_speakers[addr[0]] = "Bose Speaker"
+                ip = addr[0]
+                if ip in self.forgotten_ips:
+                    continue  # stay forgotten, do not resurrect on scan
+                if ip not in self.discovered_speakers:
+                    self.log(f"Found speaker at {ip}", "SUCCESS")
+                self.discovered_speakers[ip] = "Bose Speaker"
         except socket.timeout:
             self.log("Scan complete.")
         finally:
             self.root.after(0, self.update_speaker_lists)
+            self.root.after(0, self.save_settings)
 
     def update_speaker_lists(self):
-        ips = list(self.discovered_speakers.keys())
-        self.speaker_combo['values'] = ips
-        if self.selected_speaker_ip.get() in ips:
-            self.speaker_combo.set(self.selected_speaker_ip.get())
-        elif ips:
+        """Rebuild every list from state, honouring the forgotten set."""
+        visible = [ip for ip in self.discovered_speakers
+                   if ip not in self.forgotten_ips]
+
+        # --- active speaker combo --------------------------------------------
+        self.speaker_combo['values'] = visible
+        current = self.selected_speaker_ip.get()
+        if current in visible:
+            self.speaker_combo.set(current)
+        elif visible:
             self.speaker_combo.current(0)
+            self.selected_speaker_ip.set(visible[0])
+        else:
+            self.selected_speaker_ip.set("")
+            self.speaker_combo.set("")
+
+        # --- master combo -----------------------------------------------------
         if hasattr(self, 'master_combo'):
-            self.master_combo['values'] = ips
+            self.master_combo['values'] = visible
+            if self.master_ip in visible:
+                self.master_combo.set(self.master_ip)
+            elif visible:
+                self.master_combo.current(0)
+                self.master_ip = visible[0]
+            else:
+                self.master_combo.set("")
+                self.master_ip = ""
+
+        # --- zone slave listbox ----------------------------------------------
         if hasattr(self, 'slave_listbox'):
+            # Drop anything no longer visible, then append newcomers
+            self.zone_slaves = [ip for ip in self.zone_slaves if ip in visible]
+            for ip in visible:
+                if ip not in self.zone_slaves:
+                    self.zone_slaves.append(ip)
+
             self.slave_listbox.delete(0, tk.END)
-            for ip in ips:
+            for ip in self.zone_slaves:
                 self.slave_listbox.insert(tk.END, ip)
+
+            # Reapply the remembered highlight where still valid
+            self.slave_listbox.selection_clear(0, tk.END)
+            size = self.slave_listbox.size()
+            kept = []
+            for idx in self.zone_selection:
+                if 0 <= idx < size:
+                    self.slave_listbox.selection_set(idx)
+                    kept.append(idx)
+            self.zone_selection = kept
 
     # ------------------------------------------------------------ factory reset
     def factory_reset(self):
@@ -484,21 +670,25 @@ class BoseQuadManager:
                                                                  sticky=tk.W, pady=5)
         self.master_combo = ttk.Combobox(zone_f, state="readonly")
         self.master_combo.grid(row=0, column=1, padx=10, pady=5)
+        self.master_combo.bind("<<ComboboxSelected>>", self.on_master_select)
 
         ttk.Label(zone_f, text="2. Select Slave Speakers:").grid(row=1, column=0,
                                                                  sticky=tk.W, pady=5)
         self.slave_listbox = tk.Listbox(zone_f, selectmode=tk.MULTIPLE, height=6)
         self.slave_listbox.grid(row=1, column=1, padx=10, pady=5)
+        self.slave_listbox.bind("<<ListboxSelect>>", self.on_slave_select)
         self.listboxes.append(self.slave_listbox)
 
         btn_f = ttk.Frame(frame)
         btn_f.pack(pady=20)
         ttk.Button(btn_f, text="🚀 Sync All Selected",
-                   command=self.start_sync_thread).pack(side=tk.LEFT, padx=10)
+                   command=self.start_sync_thread).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_f, text="🗑️ Forget",
+                   command=self.forget_slave).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_f, text="🔍 Verify Zone",
-                   command=self.verify_zone).pack(side=tk.LEFT, padx=10)
+                   command=self.verify_zone).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_f, text="❌ Clear Zone",
-                   command=self.clear_zone).pack(side=tk.LEFT, padx=10)
+                   command=self.clear_zone).pack(side=tk.LEFT, padx=5)
 
     def start_sync_thread(self):
         threading.Thread(target=self.sync_zone, daemon=True).start()
