@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bose SoundTouch Quad-Manager v5
+v5
 -------------------------------
 Theme notes for KDE / Kubuntu:
   * The default Tk theme on KDE discards most ttk colour options, which is why
