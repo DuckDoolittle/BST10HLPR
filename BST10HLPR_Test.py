@@ -269,7 +269,7 @@ class BoseQuadManager:
             border = "#b8b8b8"
             field = "#ffffff"
             sel_bg, sel_fg = "#4a90d9", "#ffffff"
-            link = "#0000cc"
+            link = "#6fa8ff"
             danger = "#c00000"
 
         self.root.configure(bg=bg)
@@ -479,9 +479,8 @@ class BoseQuadManager:
 
         right_col = ttk.Frame(top_row)
         right_col.pack(side=tk.RIGHT)
-        ttk.Button(right_col, text="🔍 Scan", command=self.start_discovery).pack(side=tk.LEFT, padx=2)
+        ttk.Button(right_col, text="🔍 Find Speakers", command=self.start_combined_scan).pack(side=tk.LEFT, padx=2)
         ttk.Button(right_col, text="🗑️ Forget", command=self.forget_ip).pack(side=tk.LEFT, padx=2)
-        ttk.Button(right_col, text="❌ Remove", command=self.remove_ip_permanently).pack(side=tk.LEFT, padx=2)
 
         # Bottom row: Manual IP entry + Add/Sweep buttons
         bottom_row = ttk.Frame(select_f)
@@ -497,7 +496,7 @@ class BoseQuadManager:
         btn_f = ttk.Frame(bottom_row)
         btn_f.pack(side=tk.LEFT)
         ttk.Button(btn_f, text="Add", command=self.add_manual_ip).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_f, text="📡 Sweep", command=self.start_http_sweep).pack(side=tk.LEFT, padx=2)
+
 
     def add_manual_ip(self):
         """Add an IP by hand. Also un-forgets it, so it is a way back in."""
@@ -733,6 +732,14 @@ class BoseQuadManager:
         finally:
             probe.close()
         return out
+
+    def start_combined_scan(self):
+        """Runs both SSDP and HTTP sweep discovery."""
+        self.log("Starting combined discovery (SSDP + HTTP Sweep)...", "INFO")
+        def run_all():
+            self.discover_speakers()
+            self.sweep_for_speakers()
+        threading.Thread(target=run_all, daemon=True).start()
 
     def start_discovery(self):
         self.log("Starting SSDP scan on all interfaces...")
@@ -1083,8 +1090,7 @@ class BoseQuadManager:
         btn_f.pack(pady=20)
         ttk.Button(btn_f, text="🚀 Sync All Selected",
                    command=self.start_sync_thread).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_f, text="🗑️ Forget",
-                   command=self.forget_slave).pack(side=tk.LEFT, padx=5)
+
         ttk.Button(btn_f, text="🔍 Verify Zone",
                    command=self.verify_zone).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_f, text="❌ Clear Zone",
