@@ -255,7 +255,7 @@ class BoseQuadManager:
         """Recolour every widget. Works because the 'clam' theme is active."""
         if self.dark_mode.get():
             bg = "#1e1e1e"          # window / frame background
-            fg = "#dcdcdc"          # text
+            fg = "#ffffff"          # text
             accent = "#2a2a2a"      # buttons, tabs, scrollbar thumbs
             border = "#3a3a3a"      # visible borders
             field = "#2a2a2a"       # entry / text / list backgrounds
@@ -413,7 +413,6 @@ class BoseQuadManager:
                  "3. Enter your home Wi-Fi details and click 'Join Wi-Fi'.")
         info_label = ttk.Label(frame, text=instr, wraplength=500, justify=tk.LEFT)
         info_label.pack(pady=10)
-        self.link_labels.append(info_label)
 
         self.add_reset_links(frame)
 
@@ -1066,6 +1065,9 @@ class BoseQuadManager:
     def build_pairing_tab(self):
         frame = ttk.Frame(self.tab_pairing, padding="20")
         frame.pack(fill=tk.BOTH, expand=True)
+
+        instr_label = ttk.Label(frame, text="Select the IP of the speaker you want as a Primary and then select the desired Slave speaker or speakers.\n\nClick the 'Sync All Selected' button.\n\nRepeat for additional rooms or zones.", wraplength=600, justify=tk.CENTER)
+        instr_label.pack(pady=10)
 
         ttk.Label(frame, text="Create Synchronized Zone",
                   font=("Arial", 12, "bold")).pack(pady=10)
