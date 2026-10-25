@@ -190,7 +190,7 @@ class BoseQuadManager:
               background=[("readonly", accent)],
               arrowcolor=[("disabled", "#808080")])
 
-        # --- labelled frames (the boxes that stayed light grey) ---------------
+        # --- labelled frames (the boxes that stayed light grey) -------------------
         s.configure("TLabelframe", background=bg, bordercolor=border,
                     lightcolor=border, darkcolor=border,
                     relief="solid", borderwidth=1)
@@ -345,7 +345,12 @@ class BoseQuadManager:
         self.speaker_combo = ttk.Combobox(top_row, textvariable=self.selected_speaker_ip,
                                           state="readonly")
         self.speaker_combo.pack(side=tk.LEFT, padx=10, expand=True, fill=tk.X)
-        ttk.Button(top_row, text="🔍 Scan", command=self.start_discovery).pack(side=tk.LEFT)
+        
+        # Group Scan and Forget buttons together
+        btn_row = ttk.Frame(top_row)
+        btn_row.pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="🔍 Scan", command=self.start_discovery).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row, text="🗑️ Forget", command=self.forget_ip).pack(side=tk.LEFT, padx=2)
 
         bottom_row = ttk.Frame(select_f)
         bottom_row.pack(fill=tk.X, pady=10)
@@ -395,7 +400,49 @@ class BoseQuadManager:
         except Exception:
             pass
 
-    # -------------------------------------------------------------- discovery
+    def forget_ip(self):
+        # Identify the currently selected speaker in the Control Center
+        ip = self.selected_speaker_ip.get()
+        if not ip:
+            messagebox.showwarning("Error", "Please select a speaker from the list first.")
+            return
+        
+        if messagebox.askyesno("Confirm", f"Forget speaker at {ip}?\nIt will remain unavailable until the next scan."):
+            if ip in self.discovered_speakers:
+                del self.discovered_speakers[ip]
+                self.update_speaker_lists()
+                self.save_settings()
+                self.log(f"Forgotten speaker at {ip}", "SUCCESS")
+                # Clear the selection if the active speaker was forgotten
+                self.selected_speaker_ip.set("")
+                self.speaker_combo.set("")
+            else:
+                self.log("Selected IP not found in discovered list.", "ERROR")
+
+    def forget_slave(self):
+        # Remove selected slave speakers from the zone listbox
+        if not hasattr(self, 'slave_listbox'):
+            self.log("Slave listbox not initialized.", "ERROR")
+            return
+
+        selected_indices = self.slave_listbox.curselection()
+        if not selected_indices:
+            messagebox.showwarning("Error", "Please select one or more slave speakers to forget.")
+            return
+
+        # Get the IPs to remove (iterate backwards to avoid index shifting issues)
+        ips_to_remove = [self.slave_listbox.get(i) for i in selected_indices]
+        
+        if messagebox.askyesno("Confirm", f"Forget {len(ips_to_remove)} selected speaker(s) from the zone?\n\n"
+                              f"{'\n'.join(ips_to_remove)}"):
+            # Delete from highest index to lowest to avoid index shifts
+            for i in sorted(selected_indices, reverse=True):
+                self.slave_listbox.delete(i)
+            
+            for ip in ips_to_remove:
+                self.log(f"Removed {ip} from zone list", "INFO")
+            self.log(f"Forgot {len(ips_to_remove)} speaker(s) from zone", "SUCCESS")
+
     def start_discovery(self):
         self.log("Starting SSDP scan...")
         threading.Thread(target=self.discover_speakers, daemon=True).start()
@@ -472,11 +519,13 @@ class BoseQuadManager:
         btn_f = ttk.Frame(frame)
         btn_f.pack(pady=20)
         ttk.Button(btn_f, text="🚀 Sync All Selected",
-                   command=self.start_sync_thread).pack(side=tk.LEFT, padx=10)
+                   command=self.start_sync_thread).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_f, text="🗑️ Forget",
+                   command=self.forget_slave).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_f, text="🔍 Verify Zone",
-                   command=self.verify_zone).pack(side=tk.LEFT, padx=10)
+                   command=self.verify_zone).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_f, text="❌ Clear Zone",
-                   command=self.clear_zone).pack(side=tk.LEFT, padx=10)
+                   command=self.clear_zone).pack(side=tk.LEFT, padx=5)
 
     def start_sync_thread(self):
         threading.Thread(target=self.sync_zone, daemon=True).start()
