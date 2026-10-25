@@ -58,7 +58,7 @@ GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
 class BoseQuadManager:
     def __init__(self, root):
         self.root = root
-        self.root.title("BST10HLPR v5")
+        self.root.title("BST10HLPR")
         self.root.geometry("800x900")
         self.config_path = os.path.expanduser("~/.bose_manager_config.json")
 
