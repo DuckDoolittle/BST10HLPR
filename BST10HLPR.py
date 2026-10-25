@@ -88,27 +88,25 @@ class BoseQuadManager:
 
     def toggle_theme(self):
         if self.dark_mode.get():
-            # Dark theme colors - Unified a bit closer to the log panel
+            # Dark theme colors - Unified Deep Dark
             bg_color = "#1e1e1e"
             fg_color = "#dcdcdc"
-            accent_color = "#333333"
+            accent_color = "#2a2a2a"
             
             self.root.config(bg=bg_color)
             self.style.configure("TFrame", background=bg_color)
             self.style.configure("TLabel", background=bg_color, foreground=fg_color)
             self.style.configure("TCheckbutton", background=bg_color, foreground=fg_color)
-            self.style.configure("TButton", background=accent_color, foreground=fg_color)
-            self.style.configure("TLabelFrame", background=bg_color, foreground=fg_color)
+            self.style.configure("TButton", background=accent_color, foreground=fg_color, borderwidth=0)
+            self.style.configure("TLabelFrame", background=bg_color, foreground=fg_color, bordercolor=bg_color)
             self.style.configure("TLabelFrame.Label", background=bg_color, foreground=fg_color)
             
             # Notebook needs special handling
-            self.style.configure("TNotebook", background=bg_color)
-            self.style.configure("TNotebook.Tab", background=accent_color, foreground=fg_color)
+            self.style.configure("TNotebook", background=bg_color, borderwidth=0)
+            self.style.configure("TNotebook.Tab", background=accent_color, foreground=fg_color, borderwidth=0)
             
             # Match the log panel exactly
             self.log_panel.config(bg="#1e1e1e", fg="#dcdcdc", insertbackground="white")
-            self.style.configure("TLabelFrame", background="#1e1e1e", foreground="#dcdcdc", bordercolor="#1e1e1e")
-            self.style.configure("TLabelFrame.Label", background="#1e1e1e", foreground="#dcdcdc")
         else:
             # Light theme colors
             bg_color = "#f0f0f0"

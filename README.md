@@ -32,7 +32,14 @@ Connecting bluetooth to that primary device will replicate the sound to the othe
 Suppots 20 speakers 5 Zones 
 Master IP is not selectible in Slave panel once selected as the master
 
+Recent
+
+Removed Zones - no need for them just select the priamary speaker IP and a slave and sync then select a new master and slaves and sunc those. Connect bluetooth device to primary speaker you will need to match the blutooth network and to the IP. 
+
+Added Dark Mode by default 
+
 Next steps
+
 Make it look cool!!!!
 
 Feel free to talk crap but if you do make it better, this is all I ask.
