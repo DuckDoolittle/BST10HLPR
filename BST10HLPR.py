@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Bose SoundTouch Quad-Manager
----------------------------
+Bose SoundTouch Quad-Manager v4
+-------------------------------
 Theme notes for KDE / Kubuntu:
   * The default Tk theme on KDE discards most ttk colour options, which is why
     LabelFrames / Entries stayed light grey. We force the 'clam' theme, which
@@ -21,6 +21,18 @@ Session persistence:
     dark_mode         -> theme
     window_geometry   -> size and position
   Saved on every change, and again on window close (WM_DELETE_WINDOW).
+
+DISCOVERY FIXES IN V4:
+  * Sends M-SEARCH separately on each IPv4 interface (fixes dual-homed hosts)
+  * Pins source address to egress NIC (avoids asymmetric routing)
+  * Queries ssdp:all, upnp:rootdevice, and MediaRenderer URNs
+  * Raised MX from 1 to 2 (Bose firmware sometimes ignores MX: 1)
+  * Added optional TCP sweep fallback for APs that filter multicast
+
+FIXES FROM V3 TO V4:
+  * Added forgotten speakers management UI to restore accidentally forgotten devices
+  * Added debug logging to track why speakers aren't showing up
+  * Improved thread safety for discovery notifications
 """
 
 import tkinter as tk
@@ -35,6 +47,11 @@ from datetime import datetime
 import xml.etree.ElementTree as ET
 import webbrowser
 import time
+import fcntl
+import struct
+import ipaddress
+from concurrent.futures import ThreadPoolExecutor
+import select
 
 
 GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
@@ -43,7 +60,7 @@ GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
 class BoseQuadManager:
     def __init__(self, root):
         self.root = root
-        self.root.title("Bose SoundTouch Quad-Manager")
+        self.root.title("BST10HLPR v4")
         self.root.geometry("800x900")
         self.config_path = os.path.expanduser("~/.bose_manager_config.json")
 
@@ -62,6 +79,13 @@ class BoseQuadManager:
         # Plain Tk widgets that need direct (non-style) recolouring
         self.listboxes = []
         self.link_labels = []
+
+        # IOCTL constants for iface enumeration
+        self.SIOCGIFADDR    = 0x8915
+        self.SIOCGIFNETMASK = 0x891b
+        self.SIOCGIFFLAGS   = 0x8913
+        self.IFF_UP         = 0x1
+        self.IFF_LOOPBACK   = 0x8
 
         self.load_settings()
         self.setup_ui()
@@ -194,16 +218,19 @@ class BoseQuadManager:
         self.tab_setup = ttk.Frame(self.tabControl)
         self.tab_control = ttk.Frame(self.tabControl)
         self.tab_pairing = ttk.Frame(self.tabControl)
+        self.tab_forgotten = ttk.Frame(self.tabControl)
         self.tab_danger = ttk.Frame(self.tabControl)
 
         self.tabControl.add(self.tab_setup, text=' 🛠️ Initial Setup ')
         self.tabControl.add(self.tab_control, text=' 🔊 Control Center ')
         self.tabControl.add(self.tab_pairing, text=' 👯 Zone Management ')
+        self.tabControl.add(self.tab_forgotten, text=' 🗂️ Forgotten Speakers ')
         self.tabControl.add(self.tab_danger, text=' ⚠️ Danger Zone ')
 
         self.build_setup_tab()
         self.build_control_tab()
         self.build_pairing_tab()
+        self.build_forgotten_tab()
         self.build_danger_tab()
 
         log_frame = ttk.LabelFrame(main_container, text=" Event Log ", padding="10")
@@ -216,6 +243,11 @@ class BoseQuadManager:
 
         self.log("Application started.")
         self.update_speaker_lists()
+        
+        # Alert if everything is forgotten
+        if len(self.forgotten_ips) >= len(self.discovered_speakers) and self.discovered_speakers:
+            self.log(f"⚠️ WARNING: ALL {len(self.forgotten_ips)} discovered speakers are forgotten!", "WARN")
+            self.log("Go to 'Forgotten Speakers' tab to restore them.", "WARN")
 
     # ------------------------------------------------------------------- theme
     def toggle_theme(self):
@@ -431,42 +463,70 @@ class BoseQuadManager:
         select_f = ttk.LabelFrame(frame, text="Device Selection", padding="10")
         select_f.pack(fill=tk.X, pady=10)
 
+        # Top row: Speaker combo + Scan/Forget buttons
         top_row = ttk.Frame(select_f)
         top_row.pack(fill=tk.X)
-        ttk.Label(top_row, text="Active Speaker:").pack(side=tk.LEFT)
-        self.speaker_combo = ttk.Combobox(top_row, textvariable=self.selected_speaker_ip,
-                                          state="readonly")
-        self.speaker_combo.pack(side=tk.LEFT, padx=10, expand=True, fill=tk.X)
+        
+        left_col = ttk.Frame(top_row)
+        left_col.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        ttk.Label(left_col, text="Active Speaker:").pack(side=tk.LEFT)
+        self.speaker_combo = ttk.Combobox(left_col, textvariable=self.selected_speaker_ip,
+                                          state="readonly", width=25)
+        self.speaker_combo.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
         self.speaker_combo.bind("<<ComboboxSelected>>", lambda e: self.save_settings())
+        
+        right_col = ttk.Frame(top_row)
+        right_col.pack(side=tk.RIGHT)
+        ttk.Button(right_col, text="🔍 Scan", command=self.start_discovery).pack(side=tk.LEFT, padx=2)
+        ttk.Button(right_col, text="🗑️ Forget", command=self.forget_ip).pack(side=tk.LEFT, padx=2)
 
-        # Group Scan and Forget buttons together
-        btn_row = ttk.Frame(top_row)
-        btn_row.pack(side=tk.LEFT)
-        ttk.Button(btn_row, text="🔍 Scan", command=self.start_discovery).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_row, text="🗑️ Forget", command=self.forget_ip).pack(side=tk.LEFT, padx=2)
-
+        # Bottom row: Manual IP entry + Add/Sweep buttons
         bottom_row = ttk.Frame(select_f)
         bottom_row.pack(fill=tk.X, pady=10)
-        ttk.Label(bottom_row, text="Add Manual IP:").pack(side=tk.LEFT)
-        self.manual_ip = ttk.Entry(bottom_row, width=20)
+        
+        ip_input_f = ttk.Frame(bottom_row)
+        ip_input_f.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        ttk.Label(ip_input_f, text="Add Manual IP:").pack(side=tk.LEFT)
+        self.manual_ip = ttk.Entry(ip_input_f, width=20)
         self.manual_ip.pack(side=tk.LEFT, padx=10)
-        ttk.Button(bottom_row, text="Add", command=self.add_manual_ip).pack(side=tk.LEFT)
+        
+        btn_f = ttk.Frame(bottom_row)
+        btn_f.pack(side=tk.LEFT)
+        ttk.Button(btn_f, text="Add", command=self.add_manual_ip).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_f, text="📡 Sweep", command=self.start_http_sweep).pack(side=tk.LEFT, padx=2)
 
     def add_manual_ip(self):
         """Add an IP by hand. Also un-forgets it, so it is a way back in."""
         ip = self.manual_ip.get().strip()
         if not ip:
+            self.log("Manual IP entry is empty.", "WARN")
             return
+        
+        # Validate basic IP format
+        ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+        if not re.match(ip_pattern, ip):
+            messagebox.showwarning("Invalid IP", 
+                                   f"'{ip}' doesn't look like a valid IP address.\n"
+                                   "Expected format: 192.168.x.x")
+            return
+        
         self.discovered_speakers[ip] = "Manually Added"
         if ip in self.forgotten_ips:
             self.forgotten_ips.discard(ip)
             self.log(f"{ip} was previously forgotten - restored to all lists.", "INFO")
+            self.refresh_forgotten_tab()
         if ip not in self.zone_slaves:
             self.zone_slaves.append(ip)
         self.manual_ip.delete(0, tk.END)
         self.update_speaker_lists()
         self.save_settings()
         self.log(f"Manually added speaker {ip}", "SUCCESS")
+        
+        # Auto-select the newly added speaker
+        self.speaker_combo.set(ip)
+        self.selected_speaker_ip.set(ip)
 
     # --------------------------------------------------------------- playback
     def on_volume_slide(self, value):
@@ -519,6 +579,7 @@ class BoseQuadManager:
             self.selected_speaker_ip.set("")
             self.speaker_combo.set("")
             self.update_speaker_lists()
+            self.refresh_forgotten_tab()
             self.save_settings()
             self.log(f"Forgotten speaker at {ip} (saved)", "SUCCESS")
 
@@ -546,6 +607,7 @@ class BoseQuadManager:
                     self.zone_slaves.remove(ip)
 
             self.zone_selection = []
+            self.refresh_forgotten_tab()
             self.update_speaker_lists()
             self.save_settings()
             self.log(f"Forgot {len(ips_to_remove)} speaker(s) from zone (saved)", "SUCCESS")
@@ -563,31 +625,178 @@ class BoseQuadManager:
         self.save_settings()
 
     # -------------------------------------------------------------- discovery
+    def _iface_ipv4(self):
+        """Return [(ifname, ip, netmask), ...] for every up, non-loopback IPv4 interface."""
+        out = []
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            for _, name in socket.if_nameindex():
+                try:
+                    req = struct.pack("256s", name[:15].encode())
+                    flags = struct.unpack(
+                        "H", fcntl.ioctl(probe.fileno(), self.SIOCGIFFLAGS, req)[16:18])[0]
+                    if not (flags & self.IFF_UP) or (flags & self.IFF_LOOPBACK):
+                        continue
+                    ip_addr = socket.inet_ntoa(
+                        fcntl.ioctl(probe.fileno(), self.SIOCGIFADDR, req)[20:24])
+                    mask = socket.inet_ntoa(
+                        fcntl.ioctl(probe.fileno(), self.SIOCGIFNETMASK, req)[20:24])
+                except OSError:
+                    continue
+                out.append((name, ip_addr, mask))
+        finally:
+            probe.close()
+        return out
+
     def start_discovery(self):
-        self.log("Starting SSDP scan...")
+        self.log("Starting SSDP scan on all interfaces...")
         threading.Thread(target=self.discover_speakers, daemon=True).start()
 
     def discover_speakers(self):
-        msg = ('M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n'
-               'MAN: "ssdp:discover"\r\nMX: 1\r\n'
-               'ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n')
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-        sock.settimeout(3)
+        """Multi-interface SSDP discovery - fixed for dual-homed hosts."""
+        MSEARCH_TEMPLATE = ("M-SEARCH * HTTP/1.1\r\n"
+                            "HOST: 239.255.255.250:1900\r\n"
+                            'MAN: "ssdp:discover"\r\n'
+                            "MX: 2\r\n"
+                            "ST: {st}\r\n\r\n")
+        TARGETS = ("ssdp:all",
+                   "upnp:rootdevice",
+                   "urn:schemas-upnp-org:device:MediaRenderer:1")
+        GROUP = ("239.255.255.250", 1900)
+        LISTEN_SECONDS = 6.0
+
+        ifaces = self._iface_ipv4()
+        if not ifaces:
+            self.log("No usable IPv4 interface found.", "ERROR")
+            self.root.after(0, self.update_speaker_lists)
+            return
+
+        own_ips = {ip for _, ip, _ in ifaces}
+        socks = []
+        for name, ip, _ in ifaces:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+                s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
+                s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF,
+                             socket.inet_aton(ip))
+                s.bind((ip, 0))          # pin the source address to this NIC
+                s.setblocking(False)
+                socks.append((name, s))
+                self.log(f"M-SEARCH egress: {name} ({ip})")
+            except OSError as e:
+                self.log(f"Cannot use {name} ({ip}): {e}", "ERROR")
+
+        if not socks:
+            self.root.after(0, self.update_speaker_lists)
+            return
+
         try:
-            sock.sendto(msg.encode(), ('239.255.255.250', 1900))
-            while True:
-                data, addr = sock.recvfrom(1024)
-                ip = addr[0]
-                if ip in self.forgotten_ips:
-                    continue  # stay forgotten, do not resurrect on scan
-                if ip not in self.discovered_speakers:
-                    self.log(f"Found speaker at {ip}", "SUCCESS")
-                self.discovered_speakers[ip] = "Bose Speaker"
-        except socket.timeout:
-            self.log("Scan complete.")
+            for attempt in range(3):
+                for st in TARGETS:
+                    packet = MSEARCH_TEMPLATE.format(st=st).encode()
+                    for name, s in socks:
+                        try:
+                            s.sendto(packet, GROUP)
+                        except OSError as e:
+                            self.log(f"Send failed on {name}: {e}", "ERROR")
+                if attempt < 2:
+                    time.sleep(0.3)
+
+            # Collect responses with select multiplexing
+            deadline = time.time() + LISTEN_SECONDS
+            found_any = False
+            while time.time() < deadline:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                readable, _, _ = select.select([s for _, s in socks], [], [],
+                                               min(remaining, 0.5))
+                for s in readable:
+                    try:
+                        data, addr = s.recvfrom(4096)
+                    except OSError:
+                        continue
+                    ip = addr[0]
+                    if ip in own_ips:
+                        continue
+                    if ip in self.forgotten_ips:
+                        self.log(f"SKIPPED (forgotten): {ip}", "DEBUG")
+                        continue
+                    server = ""
+                    m = re.search(r"(?im)^SERVER:\s*(.+)$",
+                                  data.decode("utf-8", "ignore"))
+                    if m:
+                        server = m.group(1).strip()
+                    if ip not in self.discovered_speakers:
+                        self.log(f"Found speaker at {ip}"
+                                 f"{' (' + server + ')' if server else ''}", "SUCCESS")
+                        found_any = True
+                    self.discovered_speakers[ip] = "Bose Speaker"
+            
+            if not found_any and not socks:
+                self.log("No speakers found via SSDP. Try 'Sweep' or check Forgotten tab.", "WARN")
+        except Exception as e:
+            self.log(f"Discovery error: {e}", "ERROR")
         finally:
+            for _, s in socks:
+                s.close()
             self.root.after(0, self.update_speaker_lists)
             self.root.after(0, self.save_settings)
+
+    def sweep_for_speakers(self):
+        """TCP port-8090 sweep as fallback when multicast fails."""
+        targets, own = set(), set()
+        for _, ip, mask in self._iface_ipv4():
+            own.add(ip)
+            net = ipaddress.IPv4Network(f"{ip}/{mask}", strict=False)
+            if net.num_addresses > 512:
+                net = ipaddress.IPv4Network(f"{ip}/24", strict=False)
+            targets.update(str(h) for h in net.hosts())
+        targets -= own
+        self.log(f"HTTP sweep of {len(targets)} addresses on port 8090...")
+
+        found_count = 0
+        
+        def probe(addr):
+            nonlocal found_count
+            try:
+                with socket.create_connection((addr, 8090), timeout=0.6):
+                    pass
+                res = requests.get(f"http://{addr}:8090/info", timeout=2)
+                if res.status_code == 200 and "<info" in res.text:
+                    root = ET.fromstring(res.text)
+                    return addr, (root.findtext("name") or "Bose SoundTouch")
+            except Exception:
+                return None
+            return None
+
+        with ThreadPoolExecutor(max_workers=64) as pool:
+            for hit in pool.map(probe, sorted(targets)):
+                if not hit:
+                    continue
+                addr, name = hit
+                if addr in self.forgotten_ips:
+                    self.log(f"SKIPPED (forgotten): {addr}", "DEBUG")
+                    continue
+                if addr not in self.discovered_speakers:
+                    self.log(f"Found {name} at {addr} (HTTP sweep)", "SUCCESS")
+                    found_count += 1
+                self.discovered_speakers[addr] = name
+
+        if found_count == 0:
+            self.log("HTTP sweep found nothing. Check 'Forgotten Speakers' tab!", "WARN")
+        else:
+            self.log(f"Sweep completed: found {found_count} new speaker(s)", "SUCCESS")
+
+        self.root.after(0, self.update_speaker_lists)
+        self.root.after(0, self.save_settings)
+
+    def start_http_sweep(self):
+        """Public method to trigger HTTP fallback scan."""
+        self.log("Starting HTTP port-8090 sweep...", "INFO")
+        threading.Thread(target=self.sweep_for_speakers, daemon=True).start()
 
     def update_speaker_lists(self):
         """Rebuild every list from state, honouring the forgotten set."""
@@ -639,6 +848,113 @@ class BoseQuadManager:
                     self.slave_listbox.selection_set(idx)
                     kept.append(idx)
             self.zone_selection = kept
+
+    # ----------------------------------------------------------------- forgotten
+    def build_forgotten_tab(self):
+        """Tab to manage forgotten speakers - NEW IN V4"""
+        frame = ttk.Frame(self.tab_forgotten, padding="20")
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="Manage Forgotten Speakers",
+                  font=("Arial", 12, "bold")).pack(pady=10)
+        
+        ttk.Label(frame, text="These speakers were forgotten and won't appear in lists until restored.",
+                  wraplength=400).pack(pady=5)
+
+        # Listbox for forgotten speakers
+        list_frame = ttk.Frame(frame)
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=10)
+
+        self.forgotten_listbox = tk.Listbox(list_frame, selectmode=tk.MULTIPLE, height=10)
+        self.forgotten_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.forgotten_listbox.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.forgotten_listbox.config(yscrollcommand=scrollbar.set)
+
+        # Buttons
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill=tk.X, pady=10)
+
+        ttk.Button(btn_frame, text="Restore Selected",
+                   command=self.restore_forgotten).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Restore All",
+                   command=self.restore_all_forgotten).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Clear All Forgotten",
+                   command=self.clear_all_forgotten).pack(side=tk.LEFT, padx=5)
+
+        # Stats
+        self.forgotten_stats = ttk.Label(frame, text="", font=("Arial", 9))
+        self.forgotten_stats.pack(pady=10)
+
+        self.refresh_forgotten_tab()
+
+    def refresh_forgotten_tab(self):
+        """Update the forgotten speakers listbox."""
+        if not hasattr(self, 'forgotten_listbox'):
+            return
+            
+        self.forgotten_listbox.delete(0, tk.END)
+        for ip in sorted(self.forgotten_ips):
+            label = self.discovered_speakers.get(ip, "Unknown")
+            self.forgotten_listbox.insert(tk.END, f"{ip} ({label})")
+
+        self.forgotten_stats.config(
+            text=f"Total forgotten: {len(self.forgotten_ips)} | "
+                 f"Known speakers: {len(self.discovered_speakers)} | "
+                 f"Visible: {len(self.discovered_speakers) - len(self.forgotten_ips)}"
+        )
+
+    def restore_forgotten(self):
+        """Restore selected forgotten speakers."""
+        selected_indices = self.forgotten_listbox.curselection()
+        if not selected_indices:
+            messagebox.showwarning("Error", "Please select speaker(s) to restore.")
+            return
+
+        restored = 0
+        for idx in selected_indices:
+            # Extract IP from the displayed text "IP (Label)"
+            text = self.forgotten_listbox.get(idx)
+            ip = text.split('(')[0].strip()
+            if ip in self.forgotten_ips:
+                self.forgotten_ips.discard(ip)
+                restored += 1
+        
+        self.log(f"Restored {restored} speaker(s)", "SUCCESS")
+        self.refresh_forgotten_tab()
+        self.update_speaker_lists()
+        self.save_settings()
+        self.tabControl.select(self.tab_control)
+
+    def restore_all_forgotten(self):
+        """Restore all forgotten speakers."""
+        if not self.forgotten_ips:
+            messagebox.showinfo("Info", "No forgotten speakers to restore.")
+            return
+
+        if messagebox.askyesno("Confirm",
+                               f"Restore ALL {len(self.forgotten_ips)} forgotten speakers?"):
+            self.forgotten_ips.clear()
+            self.log(f"Restored all {len(self.forgotten_ips)} forgotten speakers", "SUCCESS")
+            self.refresh_forgotten_tab()
+            self.update_speaker_lists()
+            self.save_settings()
+            self.tabControl.select(self.tab_control)
+
+    def clear_all_forgotten(self):
+        """Delete forgotten list entirely."""
+        if not self.forgotten_ips:
+            messagebox.showinfo("Info", "No forgotten speakers to clear.")
+            return
+
+        if messagebox.askyesno("Confirm",
+                               f"PERMANENTLY DELETE the forgotten list? ({len(self.forgotten_ips)} entries)\n\n"
+                               "This does NOT restore the speakers - it just deletes the record."):
+            self.forgotten_ips.clear()
+            self.log("Cleared forgotten list", "SUCCESS")
+            self.refresh_forgotten_tab()
+            self.save_settings()
 
     # ------------------------------------------------------------ factory reset
     def factory_reset(self):
