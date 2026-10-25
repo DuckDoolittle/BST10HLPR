@@ -43,7 +43,10 @@ Added Forgotten IP tab and added features
 
 Next steps
 
-Make it look cool!!!!
+Remove "Forget" button from the "Zone Management" tab.
+combine the function of the "Scan" and "Sweep" Button
+set all hyperlinks to be purple in color.
+removed the "Remove" button on the control center tab
 
 Feel free to talk crap but if you do make it better, this is all I ask.
 

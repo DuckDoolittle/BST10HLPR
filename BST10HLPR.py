@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Bose SoundTouch Quad-Manager v4
+Bose SoundTouch Quad-Manager v5
 -------------------------------
 Theme notes for KDE / Kubuntu:
   * The default Tk theme on KDE discards most ttk colour options, which is why
@@ -22,17 +22,15 @@ Session persistence:
     window_geometry   -> size and position
   Saved on every change, and again on window close (WM_DELETE_WINDOW).
 
-DISCOVERY FIXES IN V4:
-  * Sends M-SEARCH separately on each IPv4 interface (fixes dual-homed hosts)
-  * Pins source address to egress NIC (avoids asymmetric routing)
-  * Queries ssdp:all, upnp:rootdevice, and MediaRenderer URNs
-  * Raised MX from 1 to 2 (Bose firmware sometimes ignores MX: 1)
-  * Added optional TCP sweep fallback for APs that filter multicast
-
-FIXES FROM V3 TO V4:
-  * Added forgotten speakers management UI to restore accidentally forgotten devices
-  * Added debug logging to track why speakers aren't showing up
-  * Improved thread safety for discovery notifications
+FIXES FROM V4 TO V5:
+  * TRUE deletion: speakers can now be permanently removed from the config.
+    Previously "Forget" only hid an IP while it stayed in the speakers map,
+    and "Clear All Forgotten" deleted the hide-list, which resurrected the
+    entries on the next launch. Removal now purges the IP from EVERY store.
+  * New "Remove Permanently" action in the Forgotten Speakers tab.
+  * New "Remove" button (true delete) beside Forget in the Control Center.
+  * Startup no longer auto-resurrects known IPs: only entries in the
+    speakers map are shown, and nothing is re-added implicitly.
 """
 
 import tkinter as tk
@@ -60,7 +58,7 @@ GEOMETRY_RE = re.compile(r"^\d+x\d+([+-]\d+[+-]\d+)?$")
 class BoseQuadManager:
     def __init__(self, root):
         self.root = root
-        self.root.title("BST10HLPR v4")
+        self.root.title("BST10HLPR v5")
         self.root.geometry("800x900")
         self.config_path = os.path.expanduser("~/.bose_manager_config.json")
 
@@ -134,14 +132,22 @@ class BoseQuadManager:
         except tk.TclError:
             pass
 
+        master = ""
+        if hasattr(self, 'master_combo'):
+            master = self.master_combo.get()
+        elif self.master_ip:
+            master = self.master_ip
+
         data = {
             "speakers": self.discovered_speakers,
             "forgotten": sorted(self.forgotten_ips),
-            "zone_slaves": list(self.zone_slaves),
+            "zone_slaves": [ip for ip in self.zone_slaves
+                            if ip in self.discovered_speakers],
             "zone_selection": list(self.zone_selection),
-            "last_selected_ip": self.selected_speaker_ip.get(),
-            "master_ip": self.master_combo.get() if hasattr(self, 'master_combo')
-                         else self.master_ip,
+            "last_selected_ip": self.selected_speaker_ip.get()
+                                if self.selected_speaker_ip.get()
+                                in self.discovered_speakers else "",
+            "master_ip": master if master in self.discovered_speakers else "",
             "dark_mode": bool(self.dark_mode.get()),
             "window_geometry": geometry or self._saved_geometry,
         }
@@ -243,11 +249,6 @@ class BoseQuadManager:
 
         self.log("Application started.")
         self.update_speaker_lists()
-        
-        # Alert if everything is forgotten
-        if len(self.forgotten_ips) >= len(self.discovered_speakers) and self.discovered_speakers:
-            self.log(f"⚠️ WARNING: ALL {len(self.forgotten_ips)} discovered speakers are forgotten!", "WARN")
-            self.log("Go to 'Forgotten Speakers' tab to restore them.", "WARN")
 
     # ------------------------------------------------------------------- theme
     def toggle_theme(self):
@@ -268,7 +269,7 @@ class BoseQuadManager:
             border = "#b8b8b8"
             field = "#ffffff"
             sel_bg, sel_fg = "#4a90d9", "#ffffff"
-            link = "#0000cc"
+            link = "#6fa8ff"
             danger = "#c00000"
 
         self.root.configure(bg=bg)
@@ -463,39 +464,39 @@ class BoseQuadManager:
         select_f = ttk.LabelFrame(frame, text="Device Selection", padding="10")
         select_f.pack(fill=tk.X, pady=10)
 
-        # Top row: Speaker combo + Scan/Forget buttons
+        # Top row: Speaker combo + Scan/Forget/Remove buttons
         top_row = ttk.Frame(select_f)
         top_row.pack(fill=tk.X)
-        
+
         left_col = ttk.Frame(top_row)
         left_col.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
+
         ttk.Label(left_col, text="Active Speaker:").pack(side=tk.LEFT)
         self.speaker_combo = ttk.Combobox(left_col, textvariable=self.selected_speaker_ip,
                                           state="readonly", width=25)
         self.speaker_combo.pack(side=tk.LEFT, padx=10, fill=tk.X, expand=True)
         self.speaker_combo.bind("<<ComboboxSelected>>", lambda e: self.save_settings())
-        
+
         right_col = ttk.Frame(top_row)
         right_col.pack(side=tk.RIGHT)
-        ttk.Button(right_col, text="🔍 Scan", command=self.start_discovery).pack(side=tk.LEFT, padx=2)
+        ttk.Button(right_col, text="🔍 Find Speakers", command=self.start_combined_scan).pack(side=tk.LEFT, padx=2)
         ttk.Button(right_col, text="🗑️ Forget", command=self.forget_ip).pack(side=tk.LEFT, padx=2)
 
         # Bottom row: Manual IP entry + Add/Sweep buttons
         bottom_row = ttk.Frame(select_f)
         bottom_row.pack(fill=tk.X, pady=10)
-        
+
         ip_input_f = ttk.Frame(bottom_row)
         ip_input_f.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        
+
         ttk.Label(ip_input_f, text="Add Manual IP:").pack(side=tk.LEFT)
         self.manual_ip = ttk.Entry(ip_input_f, width=20)
         self.manual_ip.pack(side=tk.LEFT, padx=10)
-        
+
         btn_f = ttk.Frame(bottom_row)
         btn_f.pack(side=tk.LEFT)
         ttk.Button(btn_f, text="Add", command=self.add_manual_ip).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_f, text="📡 Sweep", command=self.start_http_sweep).pack(side=tk.LEFT, padx=2)
+
 
     def add_manual_ip(self):
         """Add an IP by hand. Also un-forgets it, so it is a way back in."""
@@ -503,30 +504,113 @@ class BoseQuadManager:
         if not ip:
             self.log("Manual IP entry is empty.", "WARN")
             return
-        
+
         # Validate basic IP format
         ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
         if not re.match(ip_pattern, ip):
-            messagebox.showwarning("Invalid IP", 
+            messagebox.showwarning("Invalid IP",
                                    f"'{ip}' doesn't look like a valid IP address.\n"
                                    "Expected format: 192.168.x.x")
             return
-        
+
         self.discovered_speakers[ip] = "Manually Added"
         if ip in self.forgotten_ips:
             self.forgotten_ips.discard(ip)
             self.log(f"{ip} was previously forgotten - restored to all lists.", "INFO")
-            self.refresh_forgotten_tab()
         if ip not in self.zone_slaves:
             self.zone_slaves.append(ip)
         self.manual_ip.delete(0, tk.END)
         self.update_speaker_lists()
+        self.refresh_forgotten_tab()
         self.save_settings()
         self.log(f"Manually added speaker {ip}", "SUCCESS")
-        
+
         # Auto-select the newly added speaker
         self.speaker_combo.set(ip)
         self.selected_speaker_ip.set(ip)
+
+    # ----------------------------------------------------------- true removal
+    def _purge_ip_everywhere(self, ip):
+        """Fully delete an IP from every persisted store."""
+        self.discovered_speakers.pop(ip, None)
+        self.forgotten_ips.discard(ip)
+        if ip in self.zone_slaves:
+            self.zone_slaves.remove(ip)
+        if self.master_ip == ip:
+            self.master_ip = ""
+        if self.selected_speaker_ip.get() == ip:
+            self.selected_speaker_ip.set("")
+
+    def remove_ip_permanently(self):
+        """Delete the active speaker from the config entirely. Stays gone
+        across restarts until it is re-discovered or re-added manually."""
+        ip = self.selected_speaker_ip.get()
+        if not ip:
+            messagebox.showwarning("Error", "Please select a speaker from the list first.")
+            return
+
+        if messagebox.askyesno("Confirm",
+                               f"PERMANENTLY REMOVE {ip}?\n\n"
+                               "Unlike Forget, this erases the IP from the saved "
+                               "config completely. It will NOT come back on the "
+                               "next launch. It can only reappear if a scan "
+                               "finds it again or you add it manually."):
+            self._purge_ip_everywhere(ip)
+            self.speaker_combo.set("")
+            self.update_speaker_lists()
+            self.refresh_forgotten_tab()
+            self.save_settings()
+            self.log(f"Permanently removed {ip} from saved config", "SUCCESS")
+
+    def remove_selected_permanently(self):
+        """Delete highlighted rows in the Forgotten tab from the config entirely."""
+        if not hasattr(self, 'forgotten_listbox'):
+            return
+        selected_indices = self.forgotten_listbox.curselection()
+        if not selected_indices:
+            messagebox.showwarning("Error", "Please select one or more entries to remove.")
+            return
+
+        ips = [self.forgotten_listbox.get(idx).split('(')[0].strip()
+               for idx in selected_indices]
+        listing = "\n".join(f"  • {ip}" for ip in ips)
+
+        if messagebox.askyesno("Confirm",
+                               f"PERMANENTLY REMOVE {len(ips)} speaker record(s)?\n\n"
+                               f"{listing}\n\n"
+                               "They are erased from the saved config completely "
+                               "and will not come back on the next launch."):
+            for ip in ips:
+                self._purge_ip_everywhere(ip)
+            self.update_speaker_lists()
+            self.refresh_forgotten_tab()
+            self.save_settings()
+            self.log(f"Permanently removed {len(ips)} speaker record(s)", "SUCCESS")
+
+    def purge_all_records(self):
+        """Wipe every speaker record, forgotten entry and zone entry."""
+        total = len(self.discovered_speakers)
+        if total == 0:
+            messagebox.showinfo("Info", "Nothing to remove - no saved records.")
+            return
+
+        if messagebox.askyesno("Confirm",
+                               f"DELETE ALL {total} saved speaker record(s)?\n\n"
+                               "Every IP is erased from the config: known list, "
+                               "forgotten list, and zone list. This cannot be "
+                               "undone - a fresh scan or manual entry is needed "
+                               "to bring anything back."):
+            self.discovered_speakers.clear()
+            self.forgotten_ips.clear()
+            self.zone_slaves = []
+            self.zone_selection = []
+            self.master_ip = ""
+            self.selected_speaker_ip.set("")
+            self.speaker_combo.set("")
+            self.update_speaker_lists()
+            self.refresh_forgotten_tab()
+            self.save_settings()
+            self.log(f"Purged all {total} speaker record(s) from config", "SUCCESS")
 
     # --------------------------------------------------------------- playback
     def on_volume_slide(self, value):
@@ -571,8 +655,9 @@ class BoseQuadManager:
 
         if messagebox.askyesno("Confirm",
                                f"Forget speaker at {ip}?\n\n"
-                               "It stays hidden after restarting. Re-add it with "
-                               "'Add Manual IP' to bring it back."):
+                               "It stays hidden after restarting. Use the "
+                               "'Forgotten Speakers' tab to restore it, or "
+                               "'Remove' to erase it permanently."):
             self.forgotten_ips.add(ip)
             if ip in self.zone_slaves:
                 self.zone_slaves.remove(ip)
@@ -600,7 +685,7 @@ class BoseQuadManager:
         if messagebox.askyesno("Confirm",
                                f"Forget {len(ips_to_remove)} speaker(s) from the zone?\n\n"
                                f"{listing}\n\nThey stay hidden after restarting. "
-                               "Re-add with 'Add Manual IP' to bring them back."):
+                               "Use the 'Forgotten Speakers' tab to restore them."):
             for ip in ips_to_remove:
                 self.forgotten_ips.add(ip)
                 if ip in self.zone_slaves:
@@ -647,6 +732,14 @@ class BoseQuadManager:
         finally:
             probe.close()
         return out
+
+    def start_combined_scan(self):
+        """Runs both SSDP and HTTP sweep discovery."""
+        self.log("Starting combined discovery (SSDP + HTTP Sweep)...", "INFO")
+        def run_all():
+            self.discover_speakers()
+            self.sweep_for_speakers()
+        threading.Thread(target=run_all, daemon=True).start()
 
     def start_discovery(self):
         self.log("Starting SSDP scan on all interfaces...")
@@ -734,15 +827,16 @@ class BoseQuadManager:
                                  f"{' (' + server + ')' if server else ''}", "SUCCESS")
                         found_any = True
                     self.discovered_speakers[ip] = "Bose Speaker"
-            
-            if not found_any and not socks:
-                self.log("No speakers found via SSDP. Try 'Sweep' or check Forgotten tab.", "WARN")
+
+            if not found_any:
+                self.log("SSDP scan finished. No new speakers found.", "INFO")
         except Exception as e:
             self.log(f"Discovery error: {e}", "ERROR")
         finally:
             for _, s in socks:
                 s.close()
             self.root.after(0, self.update_speaker_lists)
+            self.root.after(0, self.refresh_forgotten_tab)
             self.root.after(0, self.save_settings)
 
     def sweep_for_speakers(self):
@@ -758,9 +852,8 @@ class BoseQuadManager:
         self.log(f"HTTP sweep of {len(targets)} addresses on port 8090...")
 
         found_count = 0
-        
+
         def probe(addr):
-            nonlocal found_count
             try:
                 with socket.create_connection((addr, 8090), timeout=0.6):
                     pass
@@ -786,11 +879,12 @@ class BoseQuadManager:
                 self.discovered_speakers[addr] = name
 
         if found_count == 0:
-            self.log("HTTP sweep found nothing. Check 'Forgotten Speakers' tab!", "WARN")
+            self.log("HTTP sweep found no new speakers.", "INFO")
         else:
             self.log(f"Sweep completed: found {found_count} new speaker(s)", "SUCCESS")
 
         self.root.after(0, self.update_speaker_lists)
+        self.root.after(0, self.refresh_forgotten_tab)
         self.root.after(0, self.save_settings)
 
     def start_http_sweep(self):
@@ -851,23 +945,28 @@ class BoseQuadManager:
 
     # ----------------------------------------------------------------- forgotten
     def build_forgotten_tab(self):
-        """Tab to manage forgotten speakers - NEW IN V4"""
+        """Tab to manage forgotten speakers and permanently remove records."""
         frame = ttk.Frame(self.tab_forgotten, padding="20")
         frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(frame, text="Manage Forgotten Speakers",
+        ttk.Label(frame, text="Manage Saved Speakers",
                   font=("Arial", 12, "bold")).pack(pady=10)
-        
-        ttk.Label(frame, text="These speakers were forgotten and won't appear in lists until restored.",
-                  wraplength=400).pack(pady=5)
 
-        # Listbox for forgotten speakers
+        ttk.Label(frame,
+                  text="Everything the app remembers lives here.\n"
+                       "'Restore' brings a forgotten IP back to the visible lists.\n"
+                       "'Remove' erases the record permanently - it stays gone "
+                       "across restarts.",
+                  wraplength=450, justify=tk.LEFT).pack(pady=5)
+
+        # Listbox combining forgotten and known speakers
         list_frame = ttk.Frame(frame)
         list_frame.pack(fill=tk.BOTH, expand=True, pady=10)
 
         self.forgotten_listbox = tk.Listbox(list_frame, selectmode=tk.MULTIPLE, height=10)
         self.forgotten_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
+        self.listboxes.append(self.forgotten_listbox)
+
         scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.forgotten_listbox.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.forgotten_listbox.config(yscrollcommand=scrollbar.set)
@@ -876,12 +975,14 @@ class BoseQuadManager:
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(fill=tk.X, pady=10)
 
-        ttk.Button(btn_frame, text="Restore Selected",
+        ttk.Button(btn_frame, text="↩️ Restore Selected",
                    command=self.restore_forgotten).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Restore All",
+        ttk.Button(btn_frame, text="♻️ Restore All",
                    command=self.restore_all_forgotten).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Clear All Forgotten",
-                   command=self.clear_all_forgotten).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="❌ Remove Selected Permanently",
+                   command=self.remove_selected_permanently).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="💣 Delete ALL Records",
+                   command=self.purge_all_records).pack(side=tk.LEFT, padx=5)
 
         # Stats
         self.forgotten_stats = ttk.Label(frame, text="", font=("Arial", 9))
@@ -890,18 +991,22 @@ class BoseQuadManager:
         self.refresh_forgotten_tab()
 
     def refresh_forgotten_tab(self):
-        """Update the forgotten speakers listbox."""
+        """Update the saved-speakers listbox and stats line."""
         if not hasattr(self, 'forgotten_listbox'):
             return
-            
+
         self.forgotten_listbox.delete(0, tk.END)
+        # Show forgotten ones first (marked), then visible ones
         for ip in sorted(self.forgotten_ips):
             label = self.discovered_speakers.get(ip, "Unknown")
-            self.forgotten_listbox.insert(tk.END, f"{ip} ({label})")
+            self.forgotten_listbox.insert(tk.END, f"{ip} (forgotten - {label})")
+        for ip in sorted(self.discovered_speakers.keys()):
+            if ip not in self.forgotten_ips:
+                self.forgotten_listbox.insert(tk.END, f"{ip} ({self.discovered_speakers[ip]})")
 
         self.forgotten_stats.config(
-            text=f"Total forgotten: {len(self.forgotten_ips)} | "
-                 f"Known speakers: {len(self.discovered_speakers)} | "
+            text=f"Total saved: {len(self.discovered_speakers)} | "
+                 f"Forgotten: {len(self.forgotten_ips)} | "
                  f"Visible: {len(self.discovered_speakers) - len(self.forgotten_ips)}"
         )
 
@@ -914,18 +1019,17 @@ class BoseQuadManager:
 
         restored = 0
         for idx in selected_indices:
-            # Extract IP from the displayed text "IP (Label)"
+            # Extract IP from the displayed text "IP (...)"
             text = self.forgotten_listbox.get(idx)
             ip = text.split('(')[0].strip()
             if ip in self.forgotten_ips:
                 self.forgotten_ips.discard(ip)
                 restored += 1
-        
+
         self.log(f"Restored {restored} speaker(s)", "SUCCESS")
         self.refresh_forgotten_tab()
         self.update_speaker_lists()
         self.save_settings()
-        self.tabControl.select(self.tab_control)
 
     def restore_all_forgotten(self):
         """Restore all forgotten speakers."""
@@ -933,28 +1037,15 @@ class BoseQuadManager:
             messagebox.showinfo("Info", "No forgotten speakers to restore.")
             return
 
+        count = len(self.forgotten_ips)
         if messagebox.askyesno("Confirm",
-                               f"Restore ALL {len(self.forgotten_ips)} forgotten speakers?"):
+                               f"Restore ALL {count} forgotten speakers?"):
             self.forgotten_ips.clear()
-            self.log(f"Restored all {len(self.forgotten_ips)} forgotten speakers", "SUCCESS")
+            self.log(f"Restored all {count} forgotten speakers", "SUCCESS")
             self.refresh_forgotten_tab()
             self.update_speaker_lists()
             self.save_settings()
             self.tabControl.select(self.tab_control)
-
-    def clear_all_forgotten(self):
-        """Delete forgotten list entirely."""
-        if not self.forgotten_ips:
-            messagebox.showinfo("Info", "No forgotten speakers to clear.")
-            return
-
-        if messagebox.askyesno("Confirm",
-                               f"PERMANENTLY DELETE the forgotten list? ({len(self.forgotten_ips)} entries)\n\n"
-                               "This does NOT restore the speakers - it just deletes the record."):
-            self.forgotten_ips.clear()
-            self.log("Cleared forgotten list", "SUCCESS")
-            self.refresh_forgotten_tab()
-            self.save_settings()
 
     # ------------------------------------------------------------ factory reset
     def factory_reset(self):
@@ -999,8 +1090,7 @@ class BoseQuadManager:
         btn_f.pack(pady=20)
         ttk.Button(btn_f, text="🚀 Sync All Selected",
                    command=self.start_sync_thread).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_f, text="🗑️ Forget",
-                   command=self.forget_slave).pack(side=tk.LEFT, padx=5)
+
         ttk.Button(btn_f, text="🔍 Verify Zone",
                    command=self.verify_zone).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_f, text="❌ Clear Zone",
